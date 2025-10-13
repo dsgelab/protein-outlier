@@ -1,0 +1,102 @@
+import pandas as pd
+
+### pPRS calculation
+
+data_path= '/scratch/project_2007428/projects/prj_100_pprs_discordance/data/'
+EURsample= '/scratch/project_2007428/data/processing/ukbb_78537/genotypes/plink_superpop_qc/EUR_sample.tsv'
+olinkdata= '/scratch/project_2007428/data/processing/ukbb_78537/phenotypes/omics_phenotypes/olink_data.txt'
+
+
+##### Taking all EUR individuals with proteomics data
+#rule indv:
+	input: EURsample=EURsample, olinkdata=olinkdata
+	output: data_path+'EUR_proteome_sample'
+	threads:2
+	shell: ''' 
+awk 'NR==FNR{{a[$1]; next}} $1 in a' <(cut -f1 {input.EURsample} | sort -T ~/tmp/ | uniq) {input.olinkdata} | \
+sed 1d | cut -f1 | sort -T ~/tmp/ | uniq| awk '{{print $1,$1}}' > {output} 
+'''
+
+chrom= [str(c) for c in range(1,23)]
+bgen= '/scratch/project_2007428/data/base_data/ukbb_78537/genotypes/bgen/ukb22828_chr_{chr}.bgen'
+sample= '/scratch/project_2007428/data/base_data/ukbb_78537/genotypes/bgen/ukb22828.sample'
+mfi= '/scratch/project_2007428/data/base_data/ukbb_78537/genotypes/ukb_imp_info/ukb_mfi_chr{chr}_v3.txt'
+
+########## make pgen files with filtered indv (EUR with proteomics data)
+rule makepgen:
+	input: bgen=bgen, sample=sample, eurprotsample= data_path+'EUR_proteome_sample', mfi=mfi
+	output: expand(data_path+'pgen/EUR_proteome_chr{{chr}}.{end}', end= ['pgen','psam','pvar.zst'])
+	params: outprefix= lambda w,output: output[0][:-5]
+	resources: mem_mb= 40000, time="10:00:00"
+	shell: '''
+plink2 --bgen {input.bgen} 'ref-last' \
+--sample {input.sample} \
+--keep {input.eurprotsample} \
+--extract <(awk '$8 >= 0.6 {{print $2}}' {input.mfi}) \
+--make-pgen 'vzs' --out {params.outprefix} 
+'''
+
+#set-id
+rule setid:
+	input: data_path+'pgen/EUR_proteome_chr{chr}.pgen'
+	output: data_path+'pgen/EUR_proteome_chr{chr}_setid.log'
+	params: inprefix= lambda w,input: input[:-5], 
+		outprefix= lambda w,output: output[:-4]
+	resources: mem_mb= 40000, time="05:00:00"
+	shell: '''
+plink2 --pfile /scratch/project_2007428/projects/prj_100_pprs_discordance/data/pgen/EUR_proteome_chr{wildcards.chr} 'vzs' \
+--set-all-var-ids @:#:'$r':'$a' \
+--new-id-max-allele-len 10000 \
+--make-pgen 'vzs' --out /scratch/project_2007428/projects/prj_100_pprs_discordance/data/pgen/EUR_proteome_chr{wildcards.chr}_setid
+'''
+
+rule list:
+	input: expand(data_path+'pgen/EUR_proteome_chr{chr}_setid.log',chr= chrom)
+	output: data_path+'pgen/pgenmergelist'
+	shell: '''
+ls {input} | sed 's/.log//g' > {output}
+'''
+
+#merge
+rule merge:
+	input: data_path+'pgen/pgenmergelist'
+	output: data_path+'pgen/EUR_proteome.pgen'
+	params: outprefix=lambda w,output: output[:-5]
+	resources: mem_mb=30000, time="10:00:00"
+	shell: '''
+plink2 \
+--pmerge-list {input} pfile-vzs \
+--make-pgen \
+--out  /scratch/project_2007428/projects/prj_100_pprs_discordance/data/pgen/EUR_proteome
+'''
+
+## dictionary with omicdpred id and the name of the protein
+df=pd.read_csv(data_path+"Olink_trait_validation_results_with_OMICSPRED_ID.csv", sep='\t')
+df['Gene'] = df['Gene'].str.replace(';', '_', regex=False)
+omics_prot_dict= df.set_index('OMICSPRED ID').to_dict()['Gene']
+
+### WEIGHT	
+rule score:
+	input: pgen= data_path+'pgen/EUR_proteome.pgen',
+		score= data_path+'Olink/{OMICSPRED_ID}.txt'
+	output: sscore= data_path+'pPRS/EUR_{protein}_{OMICSPRED_ID}.sscore' 
+	params: inprefix= lambda w,input: input.pgen[:-5],
+		outprefix=lambda w,output: output.sscore[:-7]
+	resources: mem_mb=30000, time="5:00:00" 
+	shell: '''
+plink2 \
+--pfile {params.inprefix} \
+--score <(cat {input.score} | grep -v '#' | sed 1d | awk '{{print $2":"$3":"$4":"$5, $4, $6}} {{print $2":"$3":"$5":"$4, $4, $6}}') \
+--out {params.outprefix}
+'''
+
+rule allscores:
+	input: [data_path+f'pPRS/EUR_{protein}_{OMICSPRED_ID}.sscore' for OMICSPRED_ID, protein in omics_prot_dict.items()]
+
+
+
+
+
+
+
+

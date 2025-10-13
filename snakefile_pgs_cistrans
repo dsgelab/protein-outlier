@@ -1,0 +1,128 @@
+import pandas as pd
+import csv 
+
+data_path= '/scratch/project_2007428/projects/prj_100_pprs_discordance/data/'
+EURsample= '/scratch/project_2007428/data/processing/ukbb_78537/genotypes/plink_superpop_qc/EUR_sample.tsv'
+olinkdata= '/scratch/project_2007428/data/processing/ukbb_78537/phenotypes/omics_phenotypes/olink_data.txt'
+chrom= [str(c) for c in range(1,23)]
+bgen= '/scratch/project_2007428/data/base_data/ukbb_78537/genotypes/bgen/ukb22828_chr_{chr}.bgen'
+sample= '/scratch/project_2007428/data/base_data/ukbb_78537/genotypes/bgen/ukb22828.sample'
+mfi= '/scratch/project_2007428/data/base_data/ukbb_78537/genotypes/ukb_imp_info/ukb_mfi_chr{chr}_v3.txt'
+
+
+def alljoininput(wildcards):
+	df= pd.read_table(data_path+'iLR_outliers_prot_pos.tsv')
+	sel_omics_prot_dict= df.set_index('omicspred_id').to_dict()['protein']
+
+	return [data_path+f"cis_pPRS/cislocus_{protein}_{omicspred_id}.sscore" for omicspred_id, protein in sel_omics_prot_dict.items()] 
+
+#### filtering the omicspred file for just the cis-locus, defined as 1Mb window around start and end of protein
+rule pgscis:
+	input: pgen= data_path+'pgen/EUR_proteome.pgen',
+	       locus= data_path+'iLR_outliers_prot_pos.tsv'
+	output: sscore= data_path+'cis_pPRS/cislocus_{protein}_{omicspred_id}.sscore' 
+	params: inprefix= lambda w,input: input.pgen[:-5],
+			outprefix=lambda w,output: output.sscore[:-7],
+			data_path= '/scratch/project_2007428/projects/prj_100_pprs_discordance/data/'
+	resources: mem_mb=30000, time="5:00:00" 
+	shell: '''
+plink2 \
+--pfile {params.inprefix} \
+--score <(grep -v '#' {params.data_path}*/{wildcards.omicspred_id}.txt | sed 1d | awk 'OFS="\t" {{print $2, $3-1, $3, $4,$5,$6}}' |
+ bedtools window -a stdin -b <(grep {wildcards.protein} {input.locus} | awk 'OFS="\t" {{print $2, $3, $4}}') -w 1000000 |
+  awk 'OFS="\t" {{print $1":"$3":"$4":"$5, $4,$6}} {{print $1":"$3":"$5":"$4, $4, $6}}') \
+--out {params.outprefix}
+'''
+
+rule allpgscis:
+	input: alljoininput
+
+
+#### filtering the omicspred file for just the trans loci
+rule pgstrans:
+	input: pgen= data_path+'pgen/EUR_proteome.pgen',
+	       locus= data_path+'iLR_outliers_prot_pos.tsv'
+	output: sscore= data_path+'trans_pPRS/trans_{protein}_{omicspred_id}.sscore' 
+	params: inprefix= lambda w,input: input.pgen[:-5],
+			outprefix=lambda w,output: output.sscore[:-7],
+			data_path= '/scratch/project_2007428/projects/prj_100_pprs_discordance/data/'
+	resources: mem_mb=30000, time="5:00:00" 
+	shell: '''
+plink2 \
+--pfile {params.inprefix} \
+--score <(grep -v '#' {params.data_path}*/{wildcards.omicspred_id}.txt | sed 1d | awk 'OFS="\t" {{print $2, $3-1, $3, $4,$5,$6}}' |
+ bedtools window -v -a stdin -b <(grep {wildcards.protein} {input.locus} | awk 'OFS="\t" {{print $2, $3, $4}}') -w 1000000 |
+  awk 'OFS="\t" {{print $1":"$3":"$4":"$5, $4,$6}} {{print $1":"$3":"$5":"$4, $4, $6}}') \
+--out {params.outprefix}
+'''
+
+df= pd.read_table(data_path+'iLR_outliers_prot_pos.tsv')
+sel_omics_prot_dict= df.set_index('omicspred_id').to_dict()['protein']
+
+rule allpgstrans:
+	input: [data_path+f"trans_pPRS/trans_{protein}_{omicspred_id}.sscore" for omicspred_id, protein in sel_omics_prot_dict.items()]
+
+
+rule inputresid:
+	output: data_path+"{region}_genoresiduals.tsv"
+	params: dir= lambda wildcards: f"data/{wildcards.region}_pPRS"
+	shell: r''' 
+cat << 'EOF' > {rule}.$$.tmp.R
+
+library(data.table)
+library(dplyr)
+setwd("/scratch/project_2007428/projects/prj_100_pprs_discordance/")
+
+pprs= list.files("{params.dir}", pattern = ".sscore", full.names = T)
+indv= fread("data/idefix_olinksoma/pheno_residuals.tsv")
+allpprs= data.frame(eid= indv$eid)
+for (file in pprs) {{
+  df= fread(file) %>% select(IID,SCORE1_AVG)
+  prot= strsplit(file, "_")[[1]][3]
+  colnames(df)= c("eid",prot)
+  df= df %>% filter(eid %in% indv$eid)
+  allpprs= merge(allpprs,df, by="eid")
+}}
+write.table(allpprs, file= "{output}", sep= "\t", quote=FALSE, row.names=F)
+EOF
+Rscript {rule}.$$.tmp.R
+rm {rule}.$$.tmp.R
+'''
+
+rule phenoresid:
+	input: pheno= data_path+"idefix_olinksoma/pheno_residuals.tsv",
+	       geno= data_path+"{region}_genoresiduals.tsv"
+	output: data_path+"{region}_pheno_residuals.tsv"
+	shell: r''' 
+cat << 'EOF' > {rule}.$$.tmp.R
+library(data.table)
+library(dplyr)
+setwd("/scratch/project_2007428/projects/prj_100_pprs_discordance/")
+
+prot= fread("{input.geno}")
+pheno= fread("{input.pheno}") %>% select(colnames(prot))
+write.table(pheno, file= "{output}", sep= "\t", quote=FALSE, row.names=F)
+EOF
+Rscript {rule}.$$.tmp.R
+rm {rule}.$$.tmp.R
+'''
+
+
+##### RESIDUALS CIS-TRANS WITHOUT ADJUSTING FOR AGE AND SEX
+rule argfileres_nocov:
+	input: geno= data_path+"{region}_genoresiduals.tsv", 
+	       pheno= data_path+"{region}_pheno_residuals.tsv",
+	output: data_path+'{region}_paramfile_residuals_nocov.tsv'
+	params: outfile= data_path+'{region}_residuals_output_nocov.tsv',
+	shell: '''echo -e 'GenoFileName\t{input.geno}\nPhenoFileName\t{input.pheno}\nOutFileName\t{params.outfile}' |\
+		cat > {output}
+'''
+
+## REMEMBER : do this before in bash: export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/projappl/project_2007428/apps_by_us/ProtResid/lib
+rule residuals_nocov:
+	input: data_path+'{region}_paramfile_residuals_nocov.tsv'
+	output: data_path+'{region}_logfile_residuals_nocov.tsv'
+	shell: '''/projappl/project_2007428/apps_by_us/ProtResid/CompResid {input} > {output} '''
+
+rule all:
+	input: data_path+'cis_logfile_residuals_nocov.tsv', data_path+'trans_logfile_residuals_nocov.tsv'

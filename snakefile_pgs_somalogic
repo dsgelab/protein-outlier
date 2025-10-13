@@ -1,0 +1,149 @@
+import pandas as pd
+
+### pPRS calculation
+
+data_path= '/scratch/project_2007428/projects/prj_100_pprs_discordance/data/'
+EURsample= '/scratch/project_2007428/data/processing/ukbb_78537/genotypes/plink_superpop_qc/EUR_sample.tsv'
+olinkdata= '/scratch/project_2007428/data/processing/ukbb_78537/phenotypes/omics_phenotypes/olink_data.txt'
+prot_tr= '/scratch/project_2007428/data/processing/ukbb_78537/phenotypes/omics_phenotypes/ukb_olink_proteomics_translations.tsv'
+
+##### Taking all EUR individuals with proteomics data
+#rule indv:
+#	input: EURsample=EURsample, olinkdata=olinkdata
+#	output: data_path+'EUR_proteome_sample'
+#	threads:2
+#	shell: ''' 
+#awk 'NR==FNR{{a[$1]; next}} $1 in a' <(cut -f1 {input.EURsample} | sort -T ~/tmp/ | uniq) {input.olinkdata} | \
+#sed 1d | cut -f1 | sort -T ~/tmp/ | uniq| awk '{{print $1,$1}}' > {output} 
+#'''
+
+chrom= [str(c) for c in range(1,23)]
+bgen= '/scratch/project_2007428/data/base_data/ukbb_78537/genotypes/bgen/ukb22828_chr_{chr}.bgen'
+sample= '/scratch/project_2007428/data/base_data/ukbb_78537/genotypes/bgen/ukb22828.sample'
+mfi= '/scratch/project_2007428/data/base_data/ukbb_78537/genotypes/ukb_imp_info/ukb_mfi_chr{chr}_v3.txt'
+
+########## make pgen files with filtered indv (EUR with proteomics data)
+#rule makepgen:
+#	input: bgen=bgen, sample=sample, eurprotsample= data_path+'EUR_proteome_sample', mfi=mfi
+#	output: expand(data_path+'pgen/EUR_proteome_chr{{chr}}.{end}', end= ['pgen','psam','pvar.zst'])
+#	params: outprefix= lambda w,output: output[0][:-5]
+#	resources: mem_mb= 40000, time="10:00:00"
+#	shell: '''
+#plink2 --bgen {input.bgen} 'ref-last' \
+#--sample {input.sample} \
+#--keep {input.eurprotsample} \
+#--extract <(awk '$8 >= 0.6 {{print $2}}' {input.mfi}) \
+#--make-pgen 'vzs' --out {params.outprefix} 
+#'''
+
+#set-id
+#rule setid:
+#	input: data_path+'pgen/EUR_proteome_chr{chr}.pgen'
+#	output: data_path+'pgen/EUR_proteome_chr{chr}_setid.log'
+#	params: inprefix= lambda w,input: input[:-5], 
+#		outprefix= lambda w,output: output[:-4]
+#	resources: mem_mb= 40000, time="05:00:00"
+#	shell: '''
+#plink2 --pfile /scratch/project_2007428/projects/prj_100_pprs_discordance/data/pgen/EUR_proteome_chr{wildcards.chr} 'vzs' \
+#--set-all-var-ids @:#:'$r':'$a' \
+#--new-id-max-allele-len 10000 \
+#--make-pgen 'vzs' --out /scratch/project_2007428/projects/prj_100_pprs_discordance/data/pgen/EUR_proteome_chr{wildcards.chr}_setid
+#'''
+
+#rule list:
+#	input: expand(data_path+'pgen/EUR_proteome_chr{chr}_setid.log',chr= chrom)
+#	output: data_path+'pgen/pgenmergelist'
+#	shell: '''
+#ls {input} | sed 's/.log//g' > {output}
+#'''
+
+#merge
+#rule merge:
+#	input: data_path+'pgen/pgenmergelist'
+#	output: data_path+'pgen/EUR_proteome.pgen'
+#	params: outprefix=lambda w,output: output[:-5]
+#	resources: mem_mb=30000, time="10:00:00"
+#	shell: '''
+#plink2 \
+#--pmerge-list {input} pfile-vzs \
+#--make-pgen \
+#--out  /scratch/project_2007428/projects/prj_100_pprs_discordance/data/pgen/EUR_proteome
+#'''
+
+## here I create a dictionary with omicdpred id and the name of the protein
+#df=pd.read_csv(data_path+"Somalogic_trait_validation_results_with_OMICSPRED_ID.csv", sep='\t')
+#df['Gene'] = df['Gene'].str.replace('|', '_', regex=False)
+#df['UniProt ID'] = df['UniProt ID'].str.replace("|", "_", regex=False)
+#df['UniProt ID'] = df['UniProt ID'].replace({"Q8NEV9_Q14213":"Q14213_Q8NEV9"})
+#olinkukb = pd.read_csv(olinkdata, sep="\t")
+#all= pd.merge(df, olinkukb, left_on="UniProt ID", right_on="uniprot")
+#omics_prot_dict= all.set_index('OMICSPRED ID').to_dict()['Gene']
+
+checkpoint commonprot:
+    input:
+        somalogic_data = data_path+"Somalogic_trait_validation_results_with_OMICSPRED_ID.csv",
+        olink_data = '/scratch/project_2007428/data/processing/ukbb_78537/phenotypes/omics_phenotypes/ukb_olink_proteomics_translations.tsv'
+    output:
+        omics_prot = data_path+"somalogic_selected_proteins.csv"
+    run:
+        import pandas as pd
+        df = pd.read_csv(input.somalogic_data, sep='\t')
+        df['Gene'] = df['Gene'].str.replace('|', '_', regex=False)
+        df['UniProt ID'] = df['UniProt ID'].str.replace("|", "_", regex=False)
+        df['UniProt ID'] = df['UniProt ID'].replace({"Q8NEV9_Q14213": "Q14213_Q8NEV9"})
+        olinkukb = pd.read_csv(input.olink_data, sep="\t")
+        all_data = pd.merge(df, olinkukb, left_on="UniProt ID", right_on="uniprot")
+        all_data.to_csv(output.omics_prot, sep="\t", index=False)
+
+
+def alljoininput(wildcards):
+	f= checkpoints.commonprot.get().output[0]
+	df= pd.read_table(f)
+	sel_omics_prot_dict= df.set_index('OMICSPRED ID').to_dict()['Gene']
+	return [data_path+f"pPRS_Somalogic/EUR_{protein}_{OMICSPRED_ID}.sscore" for OMICSPRED_ID, protein in sel_omics_prot_dict.items()]
+
+### WEIGHT	
+rule score:
+	input: pgen= data_path+'pgen/EUR_proteome.pgen',
+		score= data_path+'SomaScan/{OMICSPRED_ID}.txt'
+	output: sscore= data_path+'pPRS_Somalogic/EUR_{protein}_{OMICSPRED_ID}.sscore' 
+	params: inprefix= lambda w,input: input.pgen[:-5],
+		outprefix=lambda w,output: output.sscore[:-7]
+	resources: mem_mb=30000, time="5:00:00" 
+	shell: '''
+plink2 \
+--pfile {params.inprefix} \
+--score <(cat {input.score} | grep -v '#' | sed 1d | awk '{{print $2":"$3":"$4":"$5, $4, $6}} {{print $2":"$3":"$5":"$4, $4, $6}}') \
+--out {params.outprefix}
+'''
+
+rule allscores:
+	input: alljoininput
+
+def allpredreal(wildcards):
+	f= checkpoints.commonprot.get().output[0]
+	df= pd.read_table(f)
+	sel_omics_prot_dict= df.set_index('OMICSPRED ID').to_dict()['Gene']
+	return [data_path+f"Somalogic_pred_real_protvalues/{protein}_{omicsid}_predrealprot.tsv" for omicsid, protein in sel_omics_prot_dict.items()]
+
+### taking the instance 0
+#### applied some manual correction to gene names (uniprot id is the same but gene name not)
+rule joinvalues:
+	input: sscore= data_path+'pPRS_Somalogic/EUR_{protein}_{omicsid}.sscore', prot_tr=prot_tr, olink=olinkdata
+	output: data_path+'Somalogic_pred_real_protvalues/{protein}_{omicsid}_predrealprot.tsv'
+	resources: time="00:10:00"
+	shell: '''join -j1 <(cut -f1,5 {input.sscore} | sed 1d| sort) <(awk -v OFS="\t" 'NR==FNR{{a[$2]=$1;next}} ($3 in a){{$3=a[$3]}}1' <(cut -f1,2 {input.prot_tr} |\
+        awk 'BEGIN {{map["LEG1"]="C6orf58"; map["AKT3"]="AKT1_AKT2_AKT3"; map["WARS"]="WARS1"; map["MENT"]="C1orf56"; map["EBI3_IL27"]="IL27_EBI3"}} {{if ($1 in map) {{$1 = map[$1]}} {{print}}}}') {input.olink} |\
+             awk '$3=="{wildcards.protein}" && $2==0' | cut -f1,4 | sort) > {output}
+'''	
+
+rule alljoinvalues:
+	input: allpredreal
+
+rule r2:
+    output: r2file= data_path+"Somalogic_R2_pPRSprot_nocov.tsv"
+    resources: mem_mb=20000, time="2:00:00"
+    params: r2script= data_path+"../scripts/somalogic_R2_pPRSrealprot.R"
+    shell: ''' Rscript {params.r2script} {output} '''
+
+

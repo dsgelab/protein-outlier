@@ -1,0 +1,92 @@
+#### Here I run Idefix and residuals using pPRS from INTERVAL olink + somalogic scores
+import csv 
+import pandas as pd
+        
+def getcolnumber(file, ukbbcode):
+	with open(file,"rt") as f:
+		readfile= csv.reader(f, delimiter = ',', quotechar='"')       
+		header = next(readfile)
+	return(header.index(ukbbcode)+1) 
+
+##### code for sex= 31-0.0
+##### code for Age at recuitment= 21022-0.0
+data_path= '/scratch/project_2007428/projects/prj_100_pprs_discordance/data/'
+pheno= '/scratch/project_2007428/data/base_data/ukbb_78537/phenotypes/ukbb_78537_base_phenotypes.csv'
+prot_tr= '/scratch/project_2007428/data/processing/ukbb_78537/phenotypes/omics_phenotypes/ukb_olink_proteomics_translations.tsv'
+olink_data= '/scratch/project_2007428/data/processing/ukbb_78537/phenotypes/omics_phenotypes/olink_data.txt'
+
+### here I create file pheno and list of phenotypes
+checkpoint phenos:
+    input: r2_olink= data_path+'R2_pPRSprot_nocov.tsv',
+            r2_soma= data_path+'Somalogic_R2_pPRSprot_nocov.tsv'
+    output: sel_prot= data_path+'filtered_proteins_olinksoma.tsv', 
+            sel_indv= data_path+'indv_agesex_olinksoma.tsv',
+            pheno_idefix= data_path+'idefix_olinksoma/pheno_idefix.tsv'
+    params: rscript= data_path+'../scripts/proteins_olinksoma_filtering.R', r2_cutoff= 0.2, r_cutoff= 0.5
+    resources: mem_mb=20000
+    shell: ''' Rscript {params.rscript} {input.r2_olink} {input.r2_soma} {params.r2_cutoff} {params.r_cutoff} {output.sel_prot} {output.sel_indv} {output.pheno_idefix}'''
+
+def inputfilescores(wildcards):
+	f= checkpoints.phenos.get().output[0]
+	df= pd.read_table(f)
+	sel_omics_prot_dict= df.set_index('omicspred_id').to_dict()['protname']
+	return [data_path+f"idefix_olinksoma/pPRS_idefix/EUR_{protein}_{omicsid}/sscore" for omicsid, protein in sel_omics_prot_dict.items()]
+
+### filter scores for imputed individuals and take only 2 columns for idefix
+rule filescore:
+	input: #score= data_path+'dir/EUR_{protein}_{omicsid}.sscore',
+	       indv= data_path+'indv_agesex_olinksoma.tsv'
+	output: data_path+'idefix_olinksoma/pPRS_idefix/EUR_{protein}_{omicsid}/sscore'
+	resources: time="00:10:00"
+	#params: scoreinput= lambda w,input: w.input.score.replace("dir", "*")
+	params: datapath= data_path
+	shell: ''' cut -f1,5 {params.datapath}*/EUR_{wildcards.protein}_{wildcards.omicsid}.sscore | sed 1d |\
+		 awk -v OFS="\t" 'BEGIN{{print "IID\tSCORESUM"}} NR==FNR{{a[$1]; next}} $1 in a' <(cut -f1 {input.indv} | sed 1d | sort | uniq) - > {output} '''
+
+rule allfilescores:
+	input: inputfilescores
+
+rule gwasmapping:
+	input: inputfilescores
+	output: data_path+'idefix_olinksoma/gwasmapping_idefix.tsv'
+	shell: '''ls {input} | sed -r 's/.*fix\///g; s/\/sscore//g' | awk -v OFS="\t" -F'_' 'BEGIN{{print "trait\ttraitDataType\tsummaryStatistics"}} {{print ($3 ~ /OPG/ ? $2 : $2"_"$3),"continuous",$0}}' > {output} '''
+
+sampleswap_script= data_path+"../scripts/pgs_based_sample_mix-up_correction/src/sample-swap-prediction.R"
+
+rule idefix:
+	input: rscript= sampleswap_script,
+	       pheno= data_path+"idefix_olinksoma/pheno_idefix.tsv",
+		   pgs=data_path+"idefix_olinksoma/gwasmapping_idefix.tsv"
+	output: data_path+'idefix_olinksoma/idefixresults/idefixPredictions.txt'
+	params: datapath= data_path,outprefix= lambda w,output: output[0][:-21]
+	resources: mem_mb=180000, time="72:00:00", partition="hugemem"
+	shell: r'''
+       {input.rscript} --trait-gwas-mapping {input.pgs} --phenotypes-file {input.pheno}\
+		--base-pgs-path {params.datapath}idefix_olinksoma/pPRS_idefix --pgs-file-name sscore\
+		--p-expected-mixUps 0.05 --out {params.outprefix}
+'''
+
+rule filesresiduals:
+	input: rscript= data_path+"../scripts/inputresiduals_olinksoma.R",
+	       phenoidefix= data_path+"idefix_olinksoma/pheno_idefix.tsv",
+	       proteins= data_path+"filtered_proteins_olinksoma.tsv"
+	output: outprot= data_path+"idefix_olinksoma/pheno_residuals.tsv",
+	        outpprs= data_path+"idefix_olinksoma/geno_residuals.tsv"
+	shell: ''' Rscript {input.rscript} {input.phenoidefix} {input.proteins} {output.outprot} {output.outpprs}'''
+
+
+##### RESIDUALS WITHOUT ADJUSTING FOR AGE AND SEX
+rule argfileres_nocov:
+	output: data_path+'idefix_olinksoma/paramfile_residuals_nocov.tsv'
+	params: geno= data_path+"idefix_olinksoma/geno_residuals.tsv",
+		pheno= data_path+"idefix_olinksoma/pheno_residuals.tsv",
+		outfile= data_path+'idefix_olinksoma/residuals_output_nocov.tsv',
+	shell: '''echo -e 'GenoFileName\t{params.geno}\nPhenoFileName\t{params.pheno}\nOutFileName\t{params.outfile}' |\
+		cat > {output}
+'''
+
+## REMEMBER : do this before in bash: export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/projappl/project_2007428/apps_by_us/ProtResid/lib
+rule residuals_nocov:
+	input: data_path+'idefix_olinksoma/paramfile_residuals_nocov.tsv'
+	output: data_path+'idefix_olinksoma/logfile_residuals_nocov.tsv'
+	shell: '''/projappl/project_2007428/apps_by_us/ProtResid/CompResid {input} > {output} '''
