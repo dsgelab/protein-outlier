@@ -1,4 +1,4 @@
-#### Here I run Idefix and residuals using pPRS from INTERVAL olink + somalogic scores
+#### Here I extract residuals using pPGS from INTERVAL olink + somalogic scores
 import csv 
 import pandas as pd
         
@@ -31,40 +31,6 @@ def inputfilescores(wildcards):
 	df= pd.read_table(f)
 	sel_omics_prot_dict= df.set_index('omicspred_id').to_dict()['protname']
 	return [data_path+f"idefix_olinksoma/pPRS_idefix/EUR_{protein}_{omicsid}/sscore" for omicsid, protein in sel_omics_prot_dict.items()]
-
-### filter scores for imputed individuals and take only 2 columns for idefix
-rule filescore:
-	input: #score= data_path+'dir/EUR_{protein}_{omicsid}.sscore',
-	       indv= data_path+'indv_agesex_olinksoma.tsv'
-	output: data_path+'idefix_olinksoma/pPRS_idefix/EUR_{protein}_{omicsid}/sscore'
-	resources: time="00:10:00"
-	#params: scoreinput= lambda w,input: w.input.score.replace("dir", "*")
-	params: datapath= data_path
-	shell: ''' cut -f1,5 {params.datapath}*/EUR_{wildcards.protein}_{wildcards.omicsid}.sscore | sed 1d |\
-		 awk -v OFS="\t" 'BEGIN{{print "IID\tSCORESUM"}} NR==FNR{{a[$1]; next}} $1 in a' <(cut -f1 {input.indv} | sed 1d | sort | uniq) - > {output} '''
-
-rule allfilescores:
-	input: inputfilescores
-
-rule gwasmapping:
-	input: inputfilescores
-	output: data_path+'idefix_olinksoma/gwasmapping_idefix.tsv'
-	shell: '''ls {input} | sed -r 's/.*fix\///g; s/\/sscore//g' | awk -v OFS="\t" -F'_' 'BEGIN{{print "trait\ttraitDataType\tsummaryStatistics"}} {{print ($3 ~ /OPG/ ? $2 : $2"_"$3),"continuous",$0}}' > {output} '''
-
-sampleswap_script= data_path+"../scripts/pgs_based_sample_mix-up_correction/src/sample-swap-prediction.R"
-
-rule idefix:
-	input: rscript= sampleswap_script,
-	       pheno= data_path+"idefix_olinksoma/pheno_idefix.tsv",
-		   pgs=data_path+"idefix_olinksoma/gwasmapping_idefix.tsv"
-	output: data_path+'idefix_olinksoma/idefixresults/idefixPredictions.txt'
-	params: datapath= data_path,outprefix= lambda w,output: output[0][:-21]
-	resources: mem_mb=180000, time="72:00:00", partition="hugemem"
-	shell: r'''
-       {input.rscript} --trait-gwas-mapping {input.pgs} --phenotypes-file {input.pheno}\
-		--base-pgs-path {params.datapath}idefix_olinksoma/pPRS_idefix --pgs-file-name sscore\
-		--p-expected-mixUps 0.05 --out {params.outprefix}
-'''
 
 rule filesresiduals:
 	input: rscript= data_path+"../scripts/inputresiduals_olinksoma.R",
