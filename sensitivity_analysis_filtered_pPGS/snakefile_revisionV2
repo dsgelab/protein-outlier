@@ -1,0 +1,316 @@
+import pandas as pd
+import csv 
+
+data_path= '/scratch/project_2007428/projects/prj_100_pprs_discordance/data/'
+
+df = pd.read_csv(data_path+"FG_disease_manifest.tsv", sep="\t", dtype=str)
+
+# map Endpoint -> gs path
+url_map = dict(zip(df["Endpoint"], df["FinnGen_gs"]))
+
+ENDPOINTS = sorted(url_map)
+
+rule all_downloads:
+    input:
+        expand(
+            data_path + "FinnGen_sumstats/{endpoint}.tsv.bgz",
+            endpoint=ENDPOINTS
+        )
+
+#### download meta-analysis FinnGen-UKB disease summary statistics and call them as our endpoints, details are written in the manifest file 
+# if not present the panUK sumstats, I take the INTERVENE one and I adapt it to the panUK.
+rule download_fg_sumstats:
+	output: bgz= data_path+"FinnGen_sumstats/{endpoint}.tsv.bgz"
+	params: path= data_path,
+          url=lambda wc: url_map[wc.endpoint],
+          GSUTIL = "/projappl/project_2007428/software/gsutils/google-cloud-sdk/bin/gsutil"
+	shell: '''
+    mkdir -p {params.path}FinnGen_sumstats;
+
+    {params.GSUTIL} -m cp {params.url} {output}
+'''
+
+## dictionary to retrieve name of the protein from omicspred id
+dic= pd.read_csv(data_path+"protein_loci_3478pairs.tsv", sep='\t')
+omics_prot_dict= dic.set_index(['protein', 'endpoint']).to_dict()['omicspred_id']
+
+## dictionary to retrieve name of the endpoint from protein
+#prot_disease_dict= dic.set_index('protein').to_dict()['endpoint']
+
+
+#### remove SNPs in omicspred files that are in pleiotropy with diseases. A file for each protein-disease pair will be created. 
+rule filter_omicspred:
+    input:
+        finngen=data_path+"FinnGen_sumstats/{endpoint}.tsv.bgz"
+    output: out=data_path+"FG_omicspred_filtered/{protein}__{endpoint}.txt"
+    params: omicspred= lambda w: omics_prot_dict[(w.protein, w.endpoint)],
+            path= data_path
+    shell:
+        '''
+        awk -F'\t' '
+        NR==FNR {{
+            if (FNR==1) {{
+                for (i=1;i<=NF;i++) {{
+                    if ($i=="rsid")                   rsid_i=i
+                    if ($i=="REF")                    ref_i=i
+                    if ($i=="ALT")                    alt_i=i
+                    if ($i=="all_inv_var_meta_mlogp") mlogp_i=i
+                }}
+                next
+            }}
+            if (($mlogp_i+0) > 5) {{
+                rs = $rsid_i
+                r  = $ref_i
+                a  = $alt_i
+                sig[rs,r,a] = 1
+                sig[rs,a,r] = 1
+            }}
+            next
+        }}
+        FNR==1 {{ print; next }}
+        {{
+            # omicspred: rsid effect_allele other_allele
+            rs = $1
+            ea = $4
+            oa = $5
+            if (!((rs,ea,oa) in sig) && !((rs,oa,ea) in sig)) print
+        }}
+        ' <(zcat {input.finngen}) {params.path}*/{params.omicspred}.txt > {output.out}
+        '''
+
+rule all_proteins_pruned:
+	input: [data_path+f"FG_omicspred_filtered/{r.protein}__{r.endpoint}.txt" for r in dic.itertuples(index=False)]
+
+#### filtering the previous pruned omicspred file for just the cis-locus, defined as 1Mb window around start and end of protein
+
+### output file has no header
+rule bedtools_cisfiltlocus:
+    input: omicspred_filt= data_path+"FG_omicspred_filtered/{protein}__{endpoint}.txt",
+           locus= data_path+'iLR_outliers_prot_pos.tsv'
+    output: data_path+'FG_filtered_cis_pPGS/filtlocus_{protein}__{endpoint}.tsv'
+    shell: ''' grep -v '#' {input.omicspred_filt} | sed 1d | awk 'OFS="\t" {{print $2, $3-1, $3, $4,$5,$6}}' |
+ bedtools window -a stdin -b <(grep {wildcards.protein} {input.locus} |\
+                               awk 'OFS="\t" {{print $2, $3, $4}}') -w 1000000 > {output}
+ '''
+
+rule all_locifilt:
+  input: [data_path+f"FG_filtered_cis_pPGS/filtlocus_{r.protein}__{r.endpoint}.tsv" for r in dic.itertuples(index=False)]
+
+
+### trans window filtered 
+### output file has no header 
+rule bedtools_transfiltlocus:
+    input: omicspred_filt= data_path+"FG_omicspred_filtered/{protein}__{endpoint}.txt",
+           locus= data_path+'iLR_outliers_prot_pos.tsv'
+    output: data_path+'FG_filtered_trans_pPGS/filtlocus_{protein}__{endpoint}.tsv'
+    shell: ''' grep -v '#' {input.omicspred_filt} | sed 1d | awk 'OFS="\t" {{print $2, $3-1, $3, $4,$5,$6}}' |
+ bedtools window -v -a stdin -b <(grep {wildcards.protein} {input.locus} |\
+                               awk 'OFS="\t" {{print $2, $3, $4}}') -w 1000000 > {output}
+ '''
+
+rule all_locitransfilt:
+  input: [data_path+f"FG_filtered_trans_pPGS/filtlocus_{r.protein}__{r.endpoint}.tsv" for r in dic.itertuples(index=False)]
+
+
+##------------------------------  PGS calculation -----------------------------------------------
+
+## cis filtered PGS
+
+## filter the pairs for those who have at least 1 cis-snp dropped, so re-run the PGS only on them
+res= pd.read_csv(data_path+'FG_results_instrument_selection.tsv', sep="\t")
+cis_res= res.loc[res["n_cis_dropped"].fillna(0) > 0, ["protein","endpoint"]]
+
+rule filtered_pgscis:
+	input: pgen= data_path+'pgen/EUR_proteome.pgen',
+	       locus= data_path+'FG_filtered_cis_pPGS/filtlocus_{protein}__{endpoint}.tsv'
+	output: sscore= data_path+'FG_filtered_cis_pPGS/filtlocus_{protein}__{endpoint}.sscore' 
+	params: inprefix= lambda w,input: input.pgen[:-5],
+		    outprefix=lambda w,output: output.sscore[:-7],
+		    data_path= data_path
+	resources: mem_mb=30000, time="5:00:00" 
+	shell: '''
+plink2 \
+--pfile {params.inprefix} \
+--score <(cat {input.locus} | awk 'OFS="\t" {{print $1":"$3":"$4":"$5, $4,$6}} {{print $1":"$3":"$5":"$4, $4, $6}}') \
+--out {params.outprefix}
+'''
+
+#### trans filtered PGS 
+
+## filter the pairs for those who have at least 1 trans-snp dropped, so re-run the PGS only on them
+trans_res= res.loc[res["n_trans_dropped"].fillna(0) > 0, ["protein","endpoint"]]
+
+rule filtered_pgstrans:
+	input: pgen= data_path+'pgen/EUR_proteome.pgen',
+	       locus= data_path+'FG_filtered_trans_pPGS/filtlocus_{protein}__{endpoint}.tsv'
+	output: sscore= data_path+'FG_filtered_trans_pPGS/filtlocus_{protein}__{endpoint}.sscore' 
+	params: inprefix= lambda w,input: input.pgen[:-5],
+		    outprefix=lambda w,output: output.sscore[:-7],
+		    data_path= data_path
+	resources: mem_mb=30000, time="5:00:00" 
+	shell: '''
+plink2 \
+--pfile {params.inprefix} \
+--score <(cat {input.locus} | awk 'OFS="\t" {{print $1":"$3":"$4":"$5, $4,$6}} {{print $1":"$3":"$5":"$4, $4, $6}}') \
+--out {params.outprefix}
+'''
+
+### genome-wide filtered PGS
+
+## filter the pairs for those who have at least 1 snp dropped, so re-run the PGS only on them
+filt_res= res.loc[res["n_dropped"].fillna(0) > 0, ["protein","endpoint"]]
+
+rule filtered_pgs:
+	input: pgen= data_path+'pgen/EUR_proteome.pgen',
+	       locus= data_path+"FG_omicspred_filtered/{protein}__{endpoint}.txt"
+	output: sscore= data_path+'FG_filtered_gw_pPGS/filtlocus_{protein}__{endpoint}.sscore' 
+	params: inprefix= lambda w,input: input.pgen[:-5],
+		    outprefix=lambda w,output: output.sscore[:-7],
+		    data_path= data_path
+	resources: mem_mb=30000, time="5:00:00" 
+	shell: '''
+plink2 \
+--pfile {params.inprefix} \
+--score <(cat {input.locus} | grep -v '#' | sed 1d | awk '{{print $2":"$3":"$4":"$5, $4, $6}} {{print $2":"$3":"$5":"$4, $4, $6}}') \
+--out {params.outprefix}
+'''
+
+
+ ##### ------- ALL PGS ----------------------
+rule all_pgs:
+	input: [data_path+f"FG_filtered_cis_pPGS/filtlocus_{r.protein}__{r.endpoint}.sscore" for r in cis_res.itertuples(index=False)] +
+           [data_path+f"FG_filtered_trans_pPGS/filtlocus_{r.protein}__{r.endpoint}.sscore" for r in trans_res.itertuples(index=False)] +
+           [data_path+f"FG_filtered_gw_pPGS/filtlocus_{r.protein}__{r.endpoint}.sscore" for r in filt_res.itertuples(index=False)] 
+
+
+##---------------------------------------------------------------------
+#### NOW CREATE RESIDUALS  FOR CIS- , TRANS- and GENOME-WIDE PGS #########
+##---------------------------------------------------------------------
+
+## further filter to only pairs where the sscore was actually produced
+## (some may have had ALL snps filtered out -> no sscore generated)
+def filter_existing_sscore(res_df, region):
+    def is_valid(r):
+        f = data_path + f"FG_filtered_{region}_pPGS/filtlocus_{r.protein}__{r.endpoint}.sscore"
+        return os.path.exists(f) and os.path.getsize(f) > 0  # <-- also check not empty
+    
+    mask = res_df.apply(is_valid, axis=1)
+    valid    = res_df[mask]
+    excluded = res_df[~mask]
+    
+    if len(excluded) > 0:
+        print(f"[WARNING] {region}: {len(excluded)} pairs excluded (missing or empty sscore):")
+        print(excluded.to_string())
+    
+    print(f"[INFO] {region}: {len(valid)} valid pairs remaining out of {len(res_df)}")
+    return valid
+
+cis_res_2   = filter_existing_sscore(cis_res,   "cis")
+trans_res_2 = filter_existing_sscore(trans_res, "trans")
+filt_res_2  = filter_existing_sscore(filt_res,  "gw")
+
+
+## create input files for residuals 
+rule inputresid:
+	output: data_path+"FG_filtered_{region}_pPGS/{region}_genoresiduals.tsv"
+	params: dir= lambda wildcards: f"data/FG_filtered_{wildcards.region}_pPGS"
+	shell: r''' 
+cat << 'EOF' > {rule}.$$.tmp.R
+
+library(data.table)
+library(dplyr)
+library(stringr)
+setwd("/scratch/project_2007428/projects/prj_100_pprs_discordance/")
+
+pprs= list.files("{params.dir}", pattern = ".sscore", full.names = T)
+indv= fread("data/idefix_olinksoma/pheno_residuals.tsv")
+allpprs= data.frame(eid= indv$eid)
+for (file in pprs) {{
+  df= fread(file) %>% select(IID,SCORE1_AVG)
+  prot= str_extract(file, "(?<=filtlocus_).*(?=\\.sscore)")
+  colnames(df)= c("eid",prot)
+  df= df %>% filter(eid %in% indv$eid)
+  allpprs= merge(allpprs,df, by="eid")
+}}
+write.table(allpprs, file= "{output}", sep= "\t", quote=FALSE, row.names=F)
+EOF
+Rscript {rule}.$$.tmp.R
+rm {rule}.$$.tmp.R
+'''
+
+## filter phenotype for the proteins selected and rename columns as in geno : (protein)__(endpoint)
+## here I produce a single file pheno for each protein-endpoint, then in the next rule I will merge all the pairs in a single pheno file for each region (cis and trans)
+rule phenoresid:
+	input: pheno= data_path+"idefix_olinksoma/pheno_residuals.tsv",
+	       geno= data_path+"FG_filtered_{region}_pPGS/{region}_genoresiduals.tsv"
+	output: temp(data_path+"FG_filtered_{region}_pPGS/{region}_phenoresiduals_{protein}__{endpoint}.tsv")
+	shell: r''' 
+cat << 'EOF' > {rule}.$$.tmp.R
+library(data.table)
+library(dplyr)
+setwd("/scratch/project_2007428/projects/prj_100_pprs_discordance/")
+
+prot= fread("{input.geno}")
+pheno= fread("{input.pheno}") 
+
+# select eid + protein column
+keep = c("eid", "{wildcards.protein}")
+out = pheno[, ..keep]
+
+# rename protein column -> protein__endpoint
+setnames(out, "{wildcards.protein}", "{wildcards.protein}__{wildcards.endpoint}")
+
+write.table(out, file= "{output}", sep= "\t", quote=FALSE, row.names=F)
+EOF
+Rscript {rule}.$$.tmp.R
+rm {rule}.$$.tmp.R
+'''
+
+res_by_region = {
+    "cis": cis_res_2,
+    "trans": trans_res_2,
+    "gw": filt_res_2
+}
+
+rule phenoresid_all:
+    input: lambda wc: [data_path + f"FG_filtered_{wc.region}_pPGS/{wc.region}_phenoresiduals_{r.protein}__{r.endpoint}.tsv" for r in res_by_region[wc.region].itertuples(index=False)]
+    output: data_path + "FG_filtered_{region}_pPGS/{region}_phenoresiduals.tsv"
+    shell: r'''
+cat << 'EOF' > {rule}.$$.tmp.R
+library(data.table)
+
+files = commandArgs(trailingOnly=TRUE)
+
+# start from first file, then cbind the second column of each subsequent file
+base = fread(files[1])
+
+for (f in files[-1]) {{
+  x = fread(f)
+  base = merge(base, x, by="eid", all=FALSE)
+}}
+
+fwrite(base, "{output}", sep="\t")
+EOF
+Rscript {rule}.$$.tmp.R {input}
+rm {rule}.$$.tmp.R
+'''
+
+
+##### RESIDUALS CIS-TRANS WITHOUT ADJUSTING FOR AGE AND SEX
+rule argfileres_nocov:
+	input: geno= data_path+"FG_filtered_{region}_pPGS/{region}_genoresiduals.tsv",
+	       pheno= data_path+"FG_filtered_{region}_pPGS/{region}_phenoresiduals.tsv",
+	output: data_path+'FG_filtered_{region}_pPGS/{region}_paramfile_residuals_nocov.tsv'
+	params: outfile= data_path+'FG_filtered_{region}_pPGS/{region}_residuals_output_nocov.tsv',
+	shell: '''echo -e 'GenoFileName\t{input.geno}\nPhenoFileName\t{input.pheno}\nOutFileName\t{params.outfile}' |\
+		cat > {output}
+'''
+
+## REMEMBER : do this before in bash: export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/projappl/project_2007428/apps_by_us/ProtResid/lib
+rule residuals_nocov:
+	input: data_path+'FG_filtered_{region}_pPGS/{region}_paramfile_residuals_nocov.tsv'
+	output: data_path+'FG_filtered_{region}_pPGS/{region}_logfile_residuals_nocov.tsv'
+	shell: '''/projappl/project_2007428/apps_by_us/ProtResid/CompResid {input} > {output} '''
+
+rule all:
+	input: data_path+'FG_filtered_cis_pPGS/cis_logfile_residuals_nocov.tsv', data_path+'FG_filtered_trans_pPGS/trans_logfile_residuals_nocov.tsv', data_path+'FG_filtered_gw_pPGS/gw_logfile_residuals_nocov.tsv'
