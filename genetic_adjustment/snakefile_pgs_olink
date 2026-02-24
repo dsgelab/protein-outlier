@@ -75,7 +75,7 @@ df=pd.read_csv(data_path+"Olink_trait_validation_results_with_OMICSPRED_ID.csv",
 df['Gene'] = df['Gene'].str.replace(';', '_', regex=False)
 omics_prot_dict= df.set_index('OMICSPRED ID').to_dict()['Gene']
 
-### WEIGHT	
+### PGS	
 rule score:
 	input: pgen= data_path+'pgen/EUR_proteome.pgen',
 		score= data_path+'Olink/{OMICSPRED_ID}.txt'
