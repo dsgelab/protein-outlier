@@ -2,12 +2,12 @@
 
 This repository contains code and analyses for the manuscript *"Removing genetic effects on plasma proteins enhances their utility as predictive disease biomarkers"*.
 
-## 📊 Data
+## Data
 Data used in this study are available under request via [UK Biobank](https://www.ukbiobank.ac.uk/) and [FinnGen](https://www.finngen.fi/).
 
-## 📂 Repository Structure
+## Repository Structure
 
-### 🧬 `genetic_adjustment/`
+### `genetic_adjustment/`
 
 Scripts for generating genetically adjusted protein levels.
 
@@ -19,7 +19,7 @@ Scripts for generating genetically adjusted protein levels.
 
 - `snakefile_pgs_cistrans` - Code for generating cis- and trans- pPGS and genetically adjusted proteins based on loci defined here `proteins_loci.R`.
 
-### 🏥 `disease_association/`
+### `disease_association/`
 
 Scripts to run association analyses with disease endpoints.
 
@@ -31,7 +31,7 @@ Scripts to run association analyses with disease endpoints.
 
 - `cistrans_logistic_singleprot.R` - Code for cis- and trans- adjusted proteins incident disease analysis results as in **Supplementary Figures 7** and **8** and **Supplementary Table 5**.
 
-### 🔬 `sensitivity_analysis_filtered_pPGS/`
+### `sensitivity_analysis_filtered_pPGS/`
 
 Scripts to perform sensitivity analysis excluding disease-associated variants from pPGS.
 
@@ -41,7 +41,7 @@ Scripts to perform sensitivity analysis excluding disease-associated variants fr
 
 - `V2_revision_inc_logreg_afterinstrumentselection.R` - Code for incident disease analysis results with filtered adjusted proteins and pPGS, as in **Supplementary Figure 11** and **Supplementary Table 7**.
 
-###  🌍 `exposome_analysis/`
+### `exposome_analysis/`
 
 Scripts to perform associations analyses with the exposome. 
 
@@ -49,7 +49,7 @@ Scripts to perform associations analyses with the exposome.
 
 - `revision_cis_environmental_exposures_regressions.R`- Code for associations between cis-adjusted proteins with the exposome as in **Supplementary Figure 12** and **Supplementary Table 8**.
 
-### 📊 `multi_protein_models/`
+### `multi_protein_models/`
 
 Scripts to perform LASSO-based multi-protein analyses.
 
@@ -57,7 +57,7 @@ Scripts to perform LASSO-based multi-protein analyses.
 
 - `LASSO_coxmodel.R`- Code for multi-protein C-index extraction and calibration as in **Supplementary Figure 13** and **Supplementary Table 10**.
 
-### 🔁 `replication_with_finngen_derived_pPGSweights/`
+### `replication_with_finngen_derived_pPGSweights/`
 
 Scripts to perform replication using independently derived pPGS weights from FinnGen including 7 additional proteins.
 
