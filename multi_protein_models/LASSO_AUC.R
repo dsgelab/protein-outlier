@@ -348,12 +348,6 @@ m_resid= m_resid[, colnames(m_resid) != "AggAbsResid"]
 m_cisresid= load_scale_filter_matrix("data/cis_residuals_output_nocov.tsv", rownames(m_allendpoints))
 m_cisresid= m_cisresid[, colnames(m_cisresid) != "AggAbsResid"]
 
-m_filtcisresiduals= load_scale_filter_matrix("data/filtered_cis_pPGS/cis_residuals_output_nocov.tsv", rownames(m_allendpoints))
-m_filtcisresiduals= m_filtcisresiduals[, colnames(m_filtcisresiduals) != "AggAbsResid"]
-
-m_filtresiduals= load_scale_filter_matrix("data/filtered_gw_pPGS/gw_residuals_output_nocov.tsv", rownames(m_allendpoints))
-m_filtresiduals= m_filtresiduals[, colnames(m_filtresiduals) != "AggAbsResid"]
-
 ##------------------------------ RUN LASSO ----------------------------------------------------------------------------
 
 #################### run LASSO   
@@ -366,71 +360,6 @@ pred_resid= lasso_with_stability(m_resid, m_allendpoints)
 
 ##### cis-residuals
 pred_cisresid= lasso_with_stability(m_cisresid,m_allendpoints)
-
-
-#### create a matrix with filt residuals + non filt residuals ( in case there are not filtered )
-## and run LASSO with the combination of filt + non filt
-make_residual_matrix_for_endpoint <- function(endpoint,
-                                              m_allresiduals,
-                                              m_filt_residuals,
-                                              base_prefix = "StandResid_",
-                                              sep = "__") {
-  
-  X <- as.matrix(m_allresiduals)
-  base_cols = colnames(m_allresiduals)  # StandResid_<protein>
-  proteins  = sub(paste0("^", base_prefix), "", base_cols)
-  
-  filt_cols= paste0(base_prefix, proteins, sep, endpoint)  # StandResid_<protein>__I9_CHD
-  
-  has = filt_cols %in% colnames(m_filt_residuals)
-  if (any(has)) {
-    # align rows by rownames 
-    common_ids <- intersect(rownames(X), rownames(m_filt_residuals))
-    X <- X[common_ids, , drop = FALSE]
-    X[, base_cols[has]] = as.matrix(m_filt_residuals[common_ids, filt_cols[has], drop = FALSE])
-  }
-  
-  colnames(X) <- base_cols
-  X
-}
-
-run_lasso_all_endpoints_filtered <- function(m_allendpoints,
-                                             m_allresiduals,
-                                             m_filt_residuals,
-                                             ...) {
-  endpoints <- colnames(m_allendpoints)
-  
-  fits <- vector("list", length(endpoints))
-  names(fits) <- endpoints
-  
-  for (ep in endpoints) {
-    X_ep <- make_residual_matrix_for_endpoint(
-      endpoint = ep,
-      m_allresiduals = m_allresiduals,
-      m_filt_residuals = m_filt_residuals
-    )
-    
-    Y_ep <- m_allendpoints[rownames(X_ep), ep, drop = FALSE]
-    colnames(Y_ep) <- ep  
-    
-    # your lasso function stays exactly as it is:
-    fits[[ep]] <- lasso_with_stability(X = X_ep, Y = Y_ep, ...)
-  }
-  
-  fits
-}
-
-
-lasso_residuals_filtered <- run_lasso_all_endpoints_filtered(
-  m_allendpoints   = m_allendpoints,
-  m_allresiduals   = m_resid,
-  m_filt_residuals = m_filtresiduals)
-
-
-lasso_cisresiduals_filtered <- run_lasso_all_endpoints_filtered(
-  m_allendpoints   = m_allendpoints,
-  m_allresiduals   = m_resid,
-  m_filt_residuals = m_filtcisresiduals)
 
 #-------------------------------------
 ######### extract dataframes
@@ -521,18 +450,13 @@ extract_auc_results_from_endpoint_list <- function(fits_by_endpoint, model_name)
   )
 }
 
-residFILT_auc= extract_auc_results_from_endpoint_list(lasso_residuals_filtered, model_name = "filtered-genetically adjusted proteins")
-cisresidFILT_auc= extract_auc_results_from_endpoint_list(lasso_cisresiduals_filtered, model_name = "filtered-cis-genetically adjusted proteins")
-
-
-all_models = list(prot_auc, resid_auc, cisresid_auc, residFILT_auc, cisresidFILT_auc)
+all_models = list(prot_auc, resid_auc, cisresid_auc)
 
 saveRDS(all_models, "data/revised_LASSO_AUC_all_models_extracted.rds")
 
 
 ### All predictions
-allpred= rbind(prot_auc$summary, resid_auc$summary, cisresid_auc$summary, 
-               residFILT_auc$summary, cisresidFILT_auc$summary)
+allpred= rbind(prot_auc$summary, resid_auc$summary, cisresid_auc$summary)
 allpred$Disease= gsub("_DATE","",allpred$Disease)
 allpred= merge(allpred,definitions,
                by.x="Disease", by.y="FinnGen endpoint")
@@ -748,7 +672,6 @@ compare_auc_models <- function(allpred, models_keep, compare = models_keep) {
 
 prot_resid_models <- compare_auc_models(allpred, c("unadjusted proteins","genetically adjusted proteins"))
 prot_cisresid_models <- compare_auc_models(allpred, c("unadjusted proteins","cis-genetically adjusted proteins"))
-prot_filtcisresid_models <- compare_auc_models(allpred, c("unadjusted proteins","filtered-cis-genetically adjusted proteins"))
 
 #-----------------------------------------------
 ##### plot LASSO AUC
@@ -813,30 +736,6 @@ ece= ggplot(prot_resid_models$df_wide,
         axis.text.y = element_text(size = 11),
         plot.tag = element_text(face = "bold", size = 14))
   
-
-all= readRDS("data/revised_LASSO_AUC_all_models_extracted.rds")
-
-cal= rbind(subset(all[[2]]$predictions, Disease=="KNEE_ARTHROSIS_DATE"),
-           subset(all[[1]]$predictions, Disease=="KNEE_ARTHROSIS_DATE"))
-
-c= calibration_plot(data = cal,
-                 obs = "y", pred = "pred",
-                 group = "Model",
-                 title = "Knee-Osteoarthritis")$calibration_plot + theme(plot.tag = element_text(face = "bold", size = 14),
-                                                                            legend.position = c(0.75, 0.2),
-                                                                         axis.title.x = element_text(face = "bold",size = 12),
-                                                                         axis.title.y = element_text(face = "bold",size = 12),
-                                                                         axis.text.x = element_text(size = 11),   # <-- tick labels
-                                                                         axis.text.y = element_text(size = 11))
-pdf("plots/AUC_calibration.pdf", width = 15.5, height= 7)
-ece + c + plot_annotation(tag_levels = 'A')
-dev.off()
-
-png("plots/AUC_calibration.png", width = 15.5, height= 7, units = "in", res = 300)
-ece + c + plot_annotation(tag_levels = 'A')
-dev.off()
-
-
 
 ### C-index ECE 5 
 ece5= readRDS("data/ECE5_cindex_plot.rds")
