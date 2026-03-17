@@ -18,7 +18,6 @@ rule all_downloads:
         )
 
 #### download meta-analysis FinnGen-UKB disease summary statistics and call them as our endpoints, details are written in the manifest file 
-# if not present the panUK sumstats, I take the INTERVENE one and I adapt it to the panUK.
 rule download_fg_sumstats:
 	output: bgz= data_path+"FinnGen_sumstats/{endpoint}.tsv.bgz"
 	params: path= data_path,
