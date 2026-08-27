@@ -75,6 +75,7 @@ Scripts to perform replication using independently derived pPGS weights from Fin
 
 
 `comparison_platforms.R` - Code to produce **Supplementary Figure 1**.
+`downsampling_analysis.R` - Code to produce **Supplementary Table 13** and **Supplementary Figure 17**.
 
 
 
